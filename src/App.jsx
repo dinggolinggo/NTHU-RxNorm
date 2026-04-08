@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { useMemo, useState } from "react";
 
 // ============================================================
-// NHI Drug Database (loaded from CSV at build time)
-// In production: import from /data/nhi_drugs.csv via papaparse
+// NHI Drug Database
 // ============================================================
 const DRUGS = [
   {code:"A024806100",nameEN:"Magnesium Oxide 250mg",nameZH:"氧化鎂錠",price:"1.00",form:"Tablet",ingredient:"Magnesium Oxide",manufacturer:"Hsin Tung Yang",atc:"A02AA02",category:"Antacids",usage:"Take after meals",sideEffects:"Diarrhea, abdominal cramps",storage:"Room temperature",warnings:"May reduce absorption of other drugs. Take 2 hours apart from antibiotics."},
@@ -32,7 +31,9 @@ const DRUGS = [
   {code:"A044321100",nameEN:"Doxycycline 100mg",nameZH:"去氧羥四環素膠囊",price:"2.30",form:"Capsule",ingredient:"Doxycycline",manufacturer:"Pfizer",atc:"J01AA02",category:"Antibiotic",usage:"Take with a full glass of water. Do not lie down for 30 minutes after.",sideEffects:"Sun sensitivity, nausea, esophageal irritation",storage:"Room temperature, protect from light",warnings:"Use sunscreen. Do not take with dairy, antacids, or iron. Not for pregnant women or children under 8."},
 ];
 
-// Prescription OCR simulation — matches drug names from image text
+// ============================================================
+// helpers
+// ============================================================
 function matchDrugsFromText(text) {
   const lower = text.toLowerCase();
   return DRUGS.filter(d =>
@@ -40,6 +41,65 @@ function matchDrugsFromText(text) {
     lower.includes(d.nameEN.toLowerCase().split(" ")[0]) ||
     d.nameZH.split("").some(ch => text.includes(ch) && ch.length > 1)
   );
+}
+
+function getDDIRules(selectedDrugs) {
+  const warnings = [];
+  const hasName = (name) =>
+    selectedDrugs.some(d => d.nameEN.toLowerCase().includes(name.toLowerCase()));
+
+  const hasCategory = (keyword) =>
+    selectedDrugs.some(d => d.category.toLowerCase().includes(keyword.toLowerCase()));
+
+  if (hasCategory("blood thinner") && selectedDrugs.some(d => d.nameEN.toLowerCase().includes("ibuprofen") || d.nameEN.toLowerCase().includes("diclofenac"))) {
+    warnings.push({
+      level: "high",
+      title: "Blood thinner + NSAID",
+      detail: "This combination may increase bleeding risk. Ask a doctor or pharmacist before taking them together."
+    });
+  }
+
+  if (hasName("warfarin") && selectedDrugs.some(d => d.category.toLowerCase().includes("antibiotic"))) {
+    warnings.push({
+      level: "high",
+      title: "Warfarin + Antibiotic",
+      detail: "Some antibiotics can change warfarin effect and INR level. Monitoring may be needed."
+    });
+  }
+
+  if (hasName("clopidogrel") && hasName("omeprazole")) {
+    warnings.push({
+      level: "medium",
+      title: "Clopidogrel + Omeprazole",
+      detail: "Omeprazole may reduce clopidogrel effectiveness."
+    });
+  }
+
+  if (hasName("tramadol") && selectedDrugs.some(d => d.category.toLowerCase().includes("antidepressant"))) {
+    warnings.push({
+      level: "high",
+      title: "Tramadol + Antidepressant",
+      detail: "This may increase risk of serotonin syndrome or seizures."
+    });
+  }
+
+  if (selectedDrugs.filter(d => d.category.toLowerCase().includes("cholesterol")).length >= 2) {
+    warnings.push({
+      level: "medium",
+      title: "Two statins selected",
+      detail: "You may have chosen two cholesterol medicines in the same class. Double-check for duplication."
+    });
+  }
+
+  if (warnings.length === 0 && selectedDrugs.length >= 2) {
+    warnings.push({
+      level: "ok",
+      title: "No major demo warning found",
+      detail: "No major warning matched the built-in demo rules. This is not a full clinical DDI check."
+    });
+  }
+
+  return warnings;
 }
 
 // ============================================================
@@ -54,6 +114,22 @@ export default function App() {
   const [scanResult, setScanResult] = useState(null);
   const [scanImg, setScanImg] = useState(null);
 
+  // new states
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerPage, setDrawerPage] = useState("account");
+  const [ddiOpen, setDdiOpen] = useState(false);
+  const [ddiSelection, setDdiSelection] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [profile, setProfile] = useState({
+    fullName: "",
+    age: "",
+    gender: "",
+    allergies: "",
+    conditions: "",
+    height: "",
+    weight: "",
+  });
+
   const filtered = q.length > 0
     ? DRUGS.filter(d =>
         d.nameEN.toLowerCase().includes(q.toLowerCase()) ||
@@ -65,16 +141,37 @@ export default function App() {
       )
     : DRUGS;
 
+  const ddiWarnings = useMemo(() => getDDIRules(ddiSelection), [ddiSelection]);
+
+  const pushHistory = (action, detail) => {
+    setHistory(prev => [
+      {
+        id: Date.now() + Math.random(),
+        time: new Date().toLocaleString(),
+        action,
+        detail,
+      },
+      ...prev
+    ].slice(0, 20));
+  };
+
   const addToMyMeds = (drug) => {
     if (!myMeds.find(m => m.code === drug.code)) {
       setMyMeds([...myMeds, drug]);
       setReminders(prev => ({ ...prev, [drug.code]: { enabled: false, times: ["08:00", "20:00"] } }));
+      pushHistory("Added medication", drug.nameEN);
     }
   };
 
   const removeFromMyMeds = (code) => {
+    const found = myMeds.find(m => m.code === code);
     setMyMeds(myMeds.filter(m => m.code !== code));
-    setReminders(prev => { const n = { ...prev }; delete n[code]; return n; });
+    setReminders(prev => {
+      const n = { ...prev };
+      delete n[code];
+      return n;
+    });
+    if (found) pushHistory("Removed medication", found.nameEN);
   };
 
   const toggleReminder = (code) => {
@@ -103,17 +200,22 @@ export default function App() {
     });
   };
 
-  const handleScan = () => {
-    // Simulate OCR result from the prescription photo
-    const mockOcrText = "Magnesium oxide 250mG 氧化鎂 錠 MAGNESIUM OXIDE Acetaminophen Omeprazole";
-    const matched = matchDrugsFromText(mockOcrText);
-    setScanResult(matched);
+  const toggleDDISelection = (drug) => {
+    setDdiSelection(prev =>
+      prev.find(d => d.code === drug.code)
+        ? prev.filter(d => d.code !== drug.code)
+        : [...prev, drug]
+    );
   };
 
-  // Styles
+  const saveProfile = () => {
+    pushHistory("Updated profile", profile.fullName || "Unnamed user");
+    alert("Profile saved locally in app state.");
+  };
+
   const C = {
-    app: { maxWidth: 440, margin: "0 auto", background: "#f0f4f8", minHeight: "100vh", fontFamily: "-apple-system,'Segoe UI',sans-serif" },
-    header: { background: "linear-gradient(135deg, #0ea5e9, #0284c7)", padding: "16px 20px", color: "#fff" },
+    app: { maxWidth: 440, margin: "0 auto", background: "#f0f4f8", minHeight: "100vh", fontFamily: "-apple-system,'Segoe UI',sans-serif", position: "relative" },
+    header: { background: "linear-gradient(135deg, #0ea5e9, #0284c7)", padding: "16px 20px", color: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between" },
     card: { background: "#fff", borderRadius: 14, padding: "14px 16px", marginBottom: 10, boxShadow: "0 1px 4px rgba(0,0,0,0.06)", border: "1px solid #e2e8f0" },
     inp: { width: "100%", padding: "12px 16px", borderRadius: 12, border: "1px solid #cbd5e1", fontSize: 15, boxSizing: "border-box", background: "#fff" },
     pill: (c) => ({ display: "inline-block", fontSize: 10, fontWeight: 600, padding: "3px 8px", borderRadius: 10, background: c === "cat" ? "#dbeafe" : c === "atc" ? "#fef3c7" : c === "price" ? "#d1fae5" : "#f1f5f9", color: c === "cat" ? "#1e40af" : c === "atc" ? "#92400e" : c === "price" ? "#065f46" : "#475569" }),
@@ -122,19 +224,36 @@ export default function App() {
     btnDanger: { background: "transparent", color: "#ef4444", border: "none", fontSize: 12, cursor: "pointer", padding: "4px 8px" },
     bottomNav: { display: "flex", background: "#fff", borderBottom: "2px solid #0ea5e9" },
     navBtn: (a) => ({ flex: 1, padding: "10px 4px", border: "none", background: "transparent", cursor: "pointer", textAlign: "center", color: a ? "#0ea5e9" : "#94a3b8", fontSize: 10, fontWeight: a ? 700 : 400 }),
-    section: { padding: "14px 16px" },
+    section: { padding: "14px 16px", paddingBottom: 100 },
     row: { display: "flex", justifyContent: "space-between", padding: "9px 0", borderBottom: "1px solid #f1f5f9", fontSize: 13 },
+    label: { display: "block", fontSize: 12, fontWeight: 700, color: "#334155", marginBottom: 6, marginTop: 10 },
+    smallInput: { width: "100%", padding: "10px 12px", borderRadius: 10, border: "1px solid #cbd5e1", fontSize: 14, boxSizing: "border-box" },
+    overlay: { position: "fixed", inset: 0, background: "rgba(15,23,42,0.35)", zIndex: 20 },
+    drawer: { position: "fixed", top: 0, left: 0, width: 300, maxWidth: "82vw", height: "100vh", background: "#fff", zIndex: 30, boxShadow: "4px 0 24px rgba(0,0,0,0.15)", overflowY: "auto" },
+    fab: { position: "fixed", right: 24, bottom: 24, width: 64, height: 64, borderRadius: 32, border: "none", background: "linear-gradient(135deg, #2563eb, #7c3aed)", color: "#fff", fontWeight: 800, boxShadow: "0 10px 24px rgba(37,99,235,0.35)", cursor: "pointer", zIndex: 15 },
+    modal: { position: "fixed", left: "50%", top: "50%", transform: "translate(-50%, -50%)", width: "min(420px, calc(100vw - 24px))", maxHeight: "84vh", overflowY: "auto", background: "#fff", borderRadius: 18, padding: 16, zIndex: 40, boxShadow: "0 20px 50px rgba(0,0,0,0.2)" }
   };
 
-  // ============ SEARCH TAB ============
   const SearchTab = () => (
     <div style={C.section}>
       <div style={{ position: "relative", marginBottom: 12 }}>
-        <input style={C.inp} value={q} onChange={e => setQ(e.target.value)} placeholder="Search drug name, ingredient, or category..." />
+        <input
+          style={C.inp}
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          placeholder="Search drug name, ingredient, or category..."
+        />
       </div>
       <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 8 }}>{filtered.length} drugs found</div>
       {filtered.map((d, i) => (
-        <div key={i} style={{ ...C.card, cursor: "pointer" }} onClick={() => setSel(d)}>
+        <div
+          key={i}
+          style={{ ...C.card, cursor: "pointer" }}
+          onClick={() => {
+            setSel(d);
+            pushHistory("Viewed drug", d.nameEN);
+          }}
+        >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 700, fontSize: 14, color: "#1e293b" }}>{d.nameEN}</div>
@@ -142,7 +261,7 @@ export default function App() {
             </div>
             <span style={C.pill("cat")}>{d.category}</span>
           </div>
-          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+          <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
             <span style={C.pill("atc")}>ATC: {d.atc}</span>
             <span style={C.pill("price")}>NT$ {d.price}</span>
             <span style={C.pill("form")}>{d.form}</span>
@@ -152,15 +271,21 @@ export default function App() {
     </div>
   );
 
-  // ============ DETAIL PAGE ============
   const DetailPage = () => {
     const d = sel;
     const isInMyMeds = myMeds.find(m => m.code === d.code);
+
     return (
       <div style={C.section}>
-        <button onClick={() => setSel(null)} style={{ background: "none", border: "none", color: "#0ea5e9", cursor: "pointer", fontSize: 14, padding: 0, marginBottom: 12 }}>← Back</button>
+        <button
+          onClick={() => setSel(null)}
+          style={{ background: "none", border: "none", color: "#0ea5e9", cursor: "pointer", fontSize: 14, padding: 0, marginBottom: 12 }}
+        >
+          ← Back
+        </button>
+
         <div style={{ ...C.card, padding: 20 }}>
-          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
             <span style={C.pill("cat")}>{d.category}</span>
             <span style={C.pill("atc")}>ATC: {d.atc}</span>
           </div>
@@ -181,84 +306,93 @@ export default function App() {
           ))}
         </div>
 
-        {/* How to use */}
         <div style={{ ...C.card, padding: 16 }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a", marginBottom: 8 }}>How to take</div>
           <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.6 }}>{d.usage}</div>
         </div>
 
-        {/* Side effects */}
         <div style={{ ...C.card, padding: 16 }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a", marginBottom: 8 }}>Possible side effects</div>
           <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.6 }}>{d.sideEffects}</div>
         </div>
 
-        {/* Warnings */}
         <div style={{ ...C.card, padding: 16, background: "#fef2f2", borderColor: "#fecaca" }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "#991b1b", marginBottom: 8 }}>⚠ Important warnings</div>
           <div style={{ fontSize: 13, color: "#7f1d1d", lineHeight: 1.6 }}>{d.warnings}</div>
         </div>
 
-        {/* Storage */}
         <div style={{ ...C.card, padding: 16 }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: "#0f172a", marginBottom: 8 }}>Storage</div>
           <div style={{ fontSize: 13, color: "#475569" }}>{d.storage}</div>
         </div>
 
-        {/* Add to My Meds */}
-        <button style={{ ...C.btnPrimary, marginTop: 8, background: isInMyMeds ? "#94a3b8" : "#0ea5e9" }} onClick={() => { if (!isInMyMeds) { addToMyMeds(d); } }}>
+        <button
+          style={{ ...C.btnPrimary, marginTop: 8, background: isInMyMeds ? "#94a3b8" : "#0ea5e9" }}
+          onClick={() => { if (!isInMyMeds) addToMyMeds(d); }}
+        >
           {isInMyMeds ? "✓ Already in My Medications" : "+ Add to My Medications"}
         </button>
       </div>
     );
   };
 
-  // ============ SCAN TAB ============
   const ScanTab = () => (
     <div style={C.section}>
       <div style={{ ...C.card, padding: 24, textAlign: "center" }}>
         <div style={{ fontSize: 44, marginBottom: 10 }}>📷</div>
         <div style={{ fontWeight: 700, fontSize: 16, color: "#0f172a", marginBottom: 6 }}>Scan your prescription</div>
-        <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16 }}>Upload a photo of your prescription label and we'll identify all medications automatically.</div>
+        <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16 }}>
+          Upload a photo of your prescription label and we'll identify medications automatically.
+        </div>
+
         <label style={{ ...C.btnPrimary, display: "block", cursor: "pointer" }}>
           📤 Upload prescription photo
-          <input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) {
-              setScanImg(URL.createObjectURL(file));
-              // Simulate OCR processing
-              setTimeout(() => {
-                const mockText = "Magnesium oxide 250mG 氧化鎂 Acetaminophen 500mg Omeprazole 20mg";
-                setScanResult(matchDrugsFromText(mockText));
-              }, 1500);
-            }
-          }} />
+          <input
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) {
+                setScanImg(URL.createObjectURL(file));
+                setTimeout(() => {
+                  const mockText = "Magnesium oxide 250mG 氧化鎂 Acetaminophen 500mg Omeprazole 20mg";
+                  const matched = matchDrugsFromText(mockText);
+                  setScanResult(matched);
+                  pushHistory("Scanned prescription", `${matched.length} item(s) found`);
+                }, 1000);
+              }
+            }}
+          />
         </label>
 
-        {/* Demo button */}
-        <button style={{ ...C.btnOutline, marginTop: 12, width: "100%" }} onClick={() => {
-          setScanImg("/prescription_demo.jpg");
-          setTimeout(() => {
-            const mockText = "Magnesium oxide 250mG 氧化鎂 MAGNESIUM OXIDE Acetaminophen Omeprazole";
-            setScanResult(matchDrugsFromText(mockText));
-          }, 1200);
-        }}>
+        <button
+          style={{ ...C.btnOutline, marginTop: 12, width: "100%" }}
+          onClick={() => {
+            setScanImg("/prescription_demo.jpg");
+            setTimeout(() => {
+              const mockText = "Magnesium oxide 250mG 氧化鎂 MAGNESIUM OXIDE Acetaminophen Omeprazole";
+              const matched = matchDrugsFromText(mockText);
+              setScanResult(matched);
+              pushHistory("Ran demo scan", `${matched.length} item(s) found`);
+            }, 1200);
+          }}
+        >
           Try demo prescription
         </button>
-      </div>
 
-      {/* How it works */}
-      <div style={{ ...C.card, padding: 16 }}>
-        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>How it works</div>
-        {["Upload a photo of your prescription or drug label", "OCR reads drug names in English and Chinese", "System matches to NHI drug database with ATC codes", "View full details and add to your medication list"].map((step, i) => (
-          <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 8 }}>
-            <div style={{ width: 22, height: 22, borderRadius: 11, background: "#dbeafe", color: "#1e40af", fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{i + 1}</div>
-            <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.5 }}>{step}</div>
+        {scanImg && (
+          <div style={{ marginTop: 14 }}>
+            <img
+              src={scanImg}
+              alt="Prescription preview"
+              style={{ width: "100%", borderRadius: 12, border: "1px solid #e2e8f0" }}
+            />
           </div>
-        ))}
+        )}
       </div>
 
-      {/* Scan Results */}
       {scanResult && (
         <div style={{ marginTop: 8 }}>
           <div style={{ fontWeight: 700, fontSize: 15, color: "#0f172a", marginBottom: 10 }}>
@@ -266,23 +400,18 @@ export default function App() {
           </div>
           {scanResult.map((d, i) => (
             <div key={i} style={C.card}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <div>
                   <div style={{ fontWeight: 700, fontSize: 14 }}>{d.nameEN}</div>
                   <div style={{ fontSize: 12, color: "#64748b" }}>{d.nameZH} · {d.ingredient}</div>
                   <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 3 }}>{d.usage}</div>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
-                  <span style={C.pill("cat")}>{d.category}</span>
-                  <button style={{ ...C.btnOutline, fontSize: 10, padding: "4px 10px" }} onClick={() => {
-                    addToMyMeds(d);
-                    setTab(2);
-                  }}>+ Add</button>
-                </div>
-              </div>
-              {/* Warnings inline */}
-              <div style={{ marginTop: 8, padding: 8, background: "#fef2f2", borderRadius: 8, fontSize: 11, color: "#991b1b" }}>
-                ⚠ {d.warnings}
+                <button
+                  style={{ ...C.btnOutline, fontSize: 10, padding: "6px 10px", flexShrink: 0 }}
+                  onClick={() => addToMyMeds(d)}
+                >
+                  + Add
+                </button>
               </div>
             </div>
           ))}
@@ -291,24 +420,27 @@ export default function App() {
     </div>
   );
 
-  // ============ MY MEDS + REMINDERS TAB ============
   const MyMedsTab = () => (
     <div style={C.section}>
       <div style={{ fontWeight: 700, fontSize: 16, color: "#0f172a", marginBottom: 4 }}>My Medications</div>
-      <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 14 }}>{myMeds.length} medication{myMeds.length !== 1 ? "s" : ""} · Set reminders to never miss a dose</div>
+      <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 14 }}>
+        {myMeds.length} medication{myMeds.length !== 1 ? "s" : ""} · Set reminders to never miss a dose
+      </div>
 
       {myMeds.length === 0 ? (
         <div style={{ ...C.card, padding: 32, textAlign: "center" }}>
           <div style={{ fontSize: 36, marginBottom: 8 }}>💊</div>
           <div style={{ fontWeight: 600, fontSize: 14, color: "#64748b" }}>No medications added yet</div>
-          <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>Search for drugs or scan a prescription to add them here.</div>
+          <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 4 }}>
+            Search for drugs or scan a prescription to add them here.
+          </div>
         </div>
       ) : (
         myMeds.map((d, i) => {
           const rem = reminders[d.code] || { enabled: false, times: ["08:00", "20:00"] };
           return (
             <div key={i} style={{ ...C.card, padding: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
                 <div>
                   <div style={{ fontWeight: 700, fontSize: 14 }}>{d.nameEN}</div>
                   <div style={{ fontSize: 12, color: "#64748b" }}>{d.ingredient} · {d.form}</div>
@@ -318,31 +450,59 @@ export default function App() {
 
               <div style={{ fontSize: 11, color: "#64748b", marginTop: 6, marginBottom: 10 }}>{d.usage}</div>
 
-              {/* Reminder section */}
               <div style={{ background: "#f0f9ff", borderRadius: 10, padding: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <span style={{ fontWeight: 600, fontSize: 13, color: "#0c4a6e" }}>Reminders</span>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-                    <div style={{ position: "relative", width: 40, height: 22, borderRadius: 11, background: rem.enabled ? "#0ea5e9" : "#cbd5e1", transition: "background .2s", cursor: "pointer" }} onClick={() => toggleReminder(d.code)}>
-                      <div style={{ position: "absolute", top: 2, left: rem.enabled ? 20 : 2, width: 18, height: 18, borderRadius: 9, background: "#fff", transition: "left .2s", boxShadow: "0 1px 2px rgba(0,0,0,0.15)" }} />
-                    </div>
-                  </label>
+                  <div
+                    style={{ position: "relative", width: 40, height: 22, borderRadius: 11, background: rem.enabled ? "#0ea5e9" : "#cbd5e1", transition: "background .2s", cursor: "pointer" }}
+                    onClick={() => toggleReminder(d.code)}
+                  >
+                    <div
+                      style={{ position: "absolute", top: 2, left: rem.enabled ? 20 : 2, width: 18, height: 18, borderRadius: 9, background: "#fff", transition: "left .2s", boxShadow: "0 1px 2px rgba(0,0,0,0.15)" }}
+                    />
+                  </div>
                 </div>
 
                 {rem.enabled && (
                   <>
                     {rem.times.map((t, ti) => (
                       <div key={ti} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                        <div style={{ width: 28, height: 28, borderRadius: 14, background: "#dbeafe", color: "#1e40af", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <div
+                          style={{
+                            width: 28,
+                            height: 28,
+                            borderRadius: 14,
+                            background: "#dbeafe",
+                            color: "#1e40af",
+                            fontSize: 11,
+                            fontWeight: 700,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center"
+                          }}
+                        >
                           {ti + 1}
                         </div>
-                        <input type="time" value={t} onChange={e => updateTime(d.code, ti, e.target.value)} style={{ flex: 1, padding: "6px 10px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 14, fontWeight: 600 }} />
+                        <input
+                          type="time"
+                          value={t}
+                          onChange={e => updateTime(d.code, ti, e.target.value)}
+                          style={{ flex: 1, padding: "6px 10px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 14, fontWeight: 600 }}
+                        />
                         {rem.times.length > 1 && (
-                          <button onClick={() => removeTime(d.code, ti)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 16, padding: "2px 6px" }}>×</button>
+                          <button
+                            onClick={() => removeTime(d.code, ti)}
+                            style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 16, padding: "2px 6px" }}
+                          >
+                            ×
+                          </button>
                         )}
                       </div>
                     ))}
-                    <button onClick={() => addTime(d.code)} style={{ background: "none", border: "1px dashed #93c5fd", borderRadius: 8, color: "#0ea5e9", cursor: "pointer", fontSize: 12, padding: "6px 12px", width: "100%", marginTop: 4 }}>
+                    <button
+                      onClick={() => addTime(d.code)}
+                      style={{ background: "none", border: "1px dashed #93c5fd", borderRadius: 8, color: "#0ea5e9", cursor: "pointer", fontSize: 12, padding: "6px 12px", width: "100%", marginTop: 4 }}
+                    >
                       + Add another time
                     </button>
                   </>
@@ -355,36 +515,241 @@ export default function App() {
     </div>
   );
 
-  return (
-    <div style={C.app}>
-      {/* Header */}
-      <div style={C.header}>
-        <div style={{ fontSize: 20, fontWeight: 800 }}>💊 Rx-Norm Taiwan</div>
-        <div style={{ fontSize: 11, opacity: 0.85, marginTop: 2 }}>Your smart pharmacopeia assistant</div>
+  const DrawerContent = () => (
+    <div style={C.drawer}>
+      <div style={{ padding: 18, borderBottom: "1px solid #e2e8f0", background: "#f8fafc" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>☰ Menu</div>
+            <div style={{ fontSize: 12, color: "#64748b" }}>Account and activity</div>
+          </div>
+          <button onClick={() => setDrawerOpen(false)} style={{ border: "none", background: "none", fontSize: 22, cursor: "pointer" }}>×</button>
+        </div>
       </div>
 
-      {/* Navigation */}
+      <div style={{ display: "flex", borderBottom: "1px solid #e2e8f0" }}>
+        {["account", "history"].map(page => (
+          <button
+            key={page}
+            onClick={() => setDrawerPage(page)}
+            style={{
+              flex: 1,
+              padding: "14px 12px",
+              border: "none",
+              background: drawerPage === page ? "#eff6ff" : "#fff",
+              color: drawerPage === page ? "#2563eb" : "#64748b",
+              fontWeight: drawerPage === page ? 700 : 500,
+              cursor: "pointer"
+            }}
+          >
+            {page === "account" ? "Account" : "History"}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ padding: 16 }}>
+        {drawerPage === "account" ? (
+          <>
+            <div style={C.card}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>Personal Data</div>
+
+              <label style={C.label}>Full name</label>
+              <input style={C.smallInput} value={profile.fullName} onChange={e => setProfile({ ...profile, fullName: e.target.value })} />
+
+              <label style={C.label}>Age</label>
+              <input style={C.smallInput} value={profile.age} onChange={e => setProfile({ ...profile, age: e.target.value })} />
+
+              <label style={C.label}>Gender</label>
+              <input style={C.smallInput} value={profile.gender} onChange={e => setProfile({ ...profile, gender: e.target.value })} />
+
+              <label style={C.label}>Allergies</label>
+              <textarea style={{ ...C.smallInput, minHeight: 70, resize: "vertical" }} value={profile.allergies} onChange={e => setProfile({ ...profile, allergies: e.target.value })} />
+
+              <label style={C.label}>Medical conditions</label>
+              <textarea style={{ ...C.smallInput, minHeight: 70, resize: "vertical" }} value={profile.conditions} onChange={e => setProfile({ ...profile, conditions: e.target.value })} />
+
+              <label style={C.label}>Height</label>
+              <input style={C.smallInput} value={profile.height} onChange={e => setProfile({ ...profile, height: e.target.value })} placeholder="e.g. 170 cm" />
+
+              <label style={C.label}>Weight</label>
+              <input style={C.smallInput} value={profile.weight} onChange={e => setProfile({ ...profile, weight: e.target.value })} placeholder="e.g. 65 kg" />
+
+              <div style={{ marginTop: 14 }}>
+                <button style={C.btnPrimary} onClick={saveProfile}>Save profile</button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 10 }}>Recent History</div>
+            {history.length === 0 ? (
+              <div style={C.card}>
+                <div style={{ fontSize: 13, color: "#64748b" }}>No activity yet.</div>
+              </div>
+            ) : (
+              history.map(item => (
+                <div key={item.id} style={C.card}>
+                  <div style={{ fontWeight: 700, fontSize: 13 }}>{item.action}</div>
+                  <div style={{ fontSize: 12, color: "#475569", marginTop: 4 }}>{item.detail}</div>
+                  <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 8 }}>{item.time}</div>
+                </div>
+              ))
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  const DDIModal = () => (
+    <div style={C.modal}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#0f172a" }}>DDI Check</div>
+          <div style={{ fontSize: 12, color: "#64748b" }}>Drug-drug interaction quick checker</div>
+        </div>
+        <button onClick={() => setDdiOpen(false)} style={{ border: "none", background: "none", fontSize: 22, cursor: "pointer" }}>×</button>
+      </div>
+
+      <div style={{ ...C.card, marginBottom: 12 }}>
+        <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Selected drugs</div>
+        {ddiSelection.length === 0 ? (
+          <div style={{ fontSize: 13, color: "#64748b" }}>Select at least 2 drugs below.</div>
+        ) : (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {ddiSelection.map(d => (
+              <span key={d.code} style={{ ...C.pill("cat"), fontSize: 11 }}>{d.nameEN}</span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid #e2e8f0", borderRadius: 12, background: "#fff", marginBottom: 12 }}>
+        {(myMeds.length > 0 ? myMeds : DRUGS.slice(0, 12)).map(d => {
+          const active = ddiSelection.some(x => x.code === d.code);
+          return (
+            <label
+              key={d.code}
+              style={{
+                display: "flex",
+                gap: 10,
+                alignItems: "flex-start",
+                padding: 12,
+                borderBottom: "1px solid #f1f5f9",
+                cursor: "pointer",
+                background: active ? "#eff6ff" : "#fff"
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={active}
+                onChange={() => toggleDDISelection(d)}
+                style={{ marginTop: 4 }}
+              />
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>{d.nameEN}</div>
+                <div style={{ fontSize: 11, color: "#64748b" }}>{d.nameZH} · {d.category}</div>
+              </div>
+            </label>
+          );
+        })}
+      </div>
+
+      <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8 }}>Results</div>
+      {ddiSelection.length < 2 ? (
+        <div style={{ ...C.card, background: "#f8fafc" }}>
+          <div style={{ fontSize: 13, color: "#64748b" }}>Choose 2 or more drugs to run the check.</div>
+        </div>
+      ) : (
+        ddiWarnings.map((w, i) => (
+          <div
+            key={i}
+            style={{
+              ...C.card,
+              background: w.level === "high" ? "#fef2f2" : w.level === "medium" ? "#fffbeb" : "#ecfdf5",
+              borderColor: w.level === "high" ? "#fecaca" : w.level === "medium" ? "#fde68a" : "#a7f3d0"
+            }}
+          >
+            <div style={{ fontWeight: 800, color: w.level === "high" ? "#b91c1c" : w.level === "medium" ? "#92400e" : "#047857" }}>
+              {w.level === "high" ? "⚠ " : w.level === "medium" ? "🟡 " : "✅ "}
+              {w.title}
+            </div>
+            <div style={{ fontSize: 12, marginTop: 6, color: "#475569", lineHeight: 1.5 }}>{w.detail}</div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+
+  return (
+    <div style={C.app}>
+      <div style={C.header}>
+        <button
+          onClick={() => setDrawerOpen(true)}
+          style={{ border: "none", background: "rgba(255,255,255,0.18)", color: "#fff", width: 40, height: 40, borderRadius: 12, fontSize: 20, cursor: "pointer" }}
+        >
+          ☰
+        </button>
+
+        <div style={{ textAlign: "center", flex: 1 }}>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>💊 Rx-Norm Taiwan</div>
+          <div style={{ fontSize: 11, opacity: 0.85, marginTop: 2 }}>Your smart pharmacopeia assistant</div>
+        </div>
+
+        <div style={{ width: 40 }} />
+      </div>
+
       <div style={C.bottomNav}>
         {[
           { icon: "🔍", label: "Search", idx: 0 },
           { icon: "📷", label: "Scan Rx", idx: 1 },
           { icon: "💊", label: "My Meds", idx: 2 },
         ].map(n => (
-          <button key={n.idx} style={C.navBtn(tab === n.idx)} onClick={() => { setTab(n.idx); setSel(null); }}>
+          <button
+            key={n.idx}
+            style={C.navBtn(tab === n.idx)}
+            onClick={() => { setTab(n.idx); setSel(null); }}
+          >
             <div style={{ fontSize: 18, marginBottom: 2 }}>{n.icon}</div>
             {n.label}
             {n.idx === 2 && myMeds.length > 0 && (
-              <span style={{ background: "#ef4444", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 5px", marginLeft: 4 }}>{myMeds.length}</span>
+              <span style={{ background: "#ef4444", color: "#fff", fontSize: 9, fontWeight: 700, borderRadius: 8, padding: "1px 5px", marginLeft: 4 }}>
+                {myMeds.length}
+              </span>
             )}
           </button>
         ))}
       </div>
 
-      {/* Content */}
       {tab === 0 && !sel && <SearchTab />}
       {tab === 0 && sel && <DetailPage />}
       {tab === 1 && <ScanTab />}
       {tab === 2 && <MyMedsTab />}
+
+      <button
+        style={C.fab}
+        onClick={() => {
+          if (ddiSelection.length === 0 && myMeds.length > 0) setDdiSelection(myMeds.slice(0, 3));
+          setDdiOpen(true);
+        }}
+        title="Open DDI checker"
+      >
+        DDI
+      </button>
+
+      {drawerOpen && (
+        <>
+          <div style={C.overlay} onClick={() => setDrawerOpen(false)} />
+          <DrawerContent />
+        </>
+      )}
+
+      {ddiOpen && (
+        <>
+          <div style={C.overlay} onClick={() => setDdiOpen(false)} />
+          <DDIModal />
+        </>
+      )}
     </div>
   );
 }
