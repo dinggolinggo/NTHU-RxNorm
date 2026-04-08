@@ -83,18 +83,18 @@ rxnorm-taiwan/
 
 | Member | Role |
 |--------|------|
-| Member A | PM / Backend Lead |
-| Member B | Frontend Lead |
-| Member C | Data Engineer |
-| Member D | ML / OCR Engineer |
-| Member E | QA / Documentation |
+| Nahathai | PM / Documentation |
+| Viriya | Developer |
+| Wisli | Developer |
+| Sirawee | Developer |
+| Shem | ML / OCR Engineer |
 
 ## 📄 License
 
-This project is for educational purposes — Software Studio course at NTHU.
+This project is for educational purposes — Practice Project of Medical Intelligent Services in Remote Areas course at NTHU.
 
 ## 🙏 Acknowledgments
-
+- Our professors: Tang Chuanyi, Ye Jianyu , Lin Yanren, Lin Wenqi
 - Boyo Social Welfare Foundation (mentors)
 - Taiwan Health Network Platform (mentors)
 - National Tsing Hua University, EECS Department
